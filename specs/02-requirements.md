@@ -39,17 +39,18 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
 - **R-2.6 (M)** Each field SHALL carry `source ∈ {qr, xml, ocr, padron, user}` and `confidence ∈ [0, 1]`.
 - **R-2.7 (S)** WHEN the official XML is later obtained, THE SYSTEM SHALL parse UBL 2.1 and treat the XML values as authoritative. Any discrepancy from the photo data is reported to the user.
 - **R-2.8 (S)** IF the QR contains a URL instead of data, THE SYSTEM SHALL store it as `document_url` for the fetcher.
+- **R-2.10 (S)** THE SYSTEM SHALL capture URLs printed on the receipt (OCR regex such as `consulte .* en (\S+)`) as `printed_urls`. They are hints for the gap PR (R-11.5), not fetch targets.
 - **R-2.9 (M)** Extraction accuracy target, measured on the golden dataset: ≥ 95% of invoices with a readable QR get every QR field exactly right; with OCR only, ≥ 80% of fields are right.
 
-## R-3 · Confirmation and flow selection
-- **R-3.1 (M)** After extraction, THE SYSTEM SHALL send **one** summary message containing:
-  - the extracted fields;
-  - a flow-choice control (reply buttons, or a list message if there are more than 3 flows);
-  - an "Edit" option.
-- **R-3.2 (M)** THE SYSTEM SHALL **suggest** a default flow from rules (for example, `num_doc_adq` equals the owner RUC → A, equals the work RUC → B). The user can still override it.
-- **R-3.3 (S)** WHEN the user picks "Edit", THE SYSTEM SHALL accept `field=value` lines (for example, `total=45.50`), re-validate, and show the summary again.
-- **R-3.4 (M)** IF the natural key `(ruc_emisor, tipo, serie, numero)` already exists in a non-failed state, THE SYSTEM SHALL tell the user it is a duplicate and stop, unless the user sends `/reprocesar <id>`.
-- **R-3.5 (S)** IF the user doesn't answer within the configured timeout (default 24 h), THE SYSTEM SHALL park the invoice as `PENDING_USER`. It is resumable with `/pendientes`.
+## R-3 · Routing and confirmation (no flow menu)
+- **R-3.1 (M)** THE SYSTEM SHALL pick the flow **automatically** with ordered routing rules (first match wins). The default rules are buyer RUC = owner RUC → A (BR-R01) and buyer RUC = work RUC → B (BR-R02). Rules can match on `num_doc_adq`, `tipo_doc_adq`, `ruc_emisor`, `tipo` and the sender profile, so adding a flow C later is a config change, not new code.
+- **R-3.2 (M)** IF no rule matches (unknown RUC, DNI or no buyer), THE SYSTEM SHALL ask with **one** message with reply buttons for the candidate flows plus Cancel (BR-R03). This is the **only** situation with a flow menu.
+- **R-3.3 (M)** IF the buyer field came from OCR with confidence below `review_threshold`, THE SYSTEM SHALL ask for confirmation with the detected flow pre-selected (BR-R04).
+- **R-3.4 (M)** WHEN routing succeeds and every required field is `ok`, THE SYSTEM SHALL send the summary (fields plus the detected flow) and **continue without waiting** (`confirm_mode: auto`). The summary carries **Editar** and **Cancelar** buttons, which stay valid until delivery starts. `confirm_mode: always` restores the explicit confirmation step.
+- **R-3.5 (S)** WHEN the user picks "Editar", THE SYSTEM SHALL accept `field=value` lines (for example, `total=45.50`), re-validate, re-route if the buyer changed, and show the summary again.
+- **R-3.6 (M)** IF the natural key `(ruc_emisor, tipo, serie, numero)` already exists in a non-failed state, THE SYSTEM SHALL stop with BR-E04, unless the user sends `/reprocesar <id>`.
+- **R-3.7 (S)** IF a question to the user isn't answered within the configured timeout (default 24 h), THE SYSTEM SHALL park the invoice as `PENDING_USER`. It is resumable with `/pendientes`.
+- **R-3.8 (M)** THE SYSTEM SHALL check the sender profile's permissions **after** routing, and reject with BR-R05 when needed.
 
 ## R-4 · Validation with SUNAT
 - **R-4.1 (S)** WHEN SUNAT API credentials are configured, THE SYSTEM SHALL call `validarcomprobante` for every confirmed invoice, regardless of flow, and store `estadoCp`, `estadoRuc` and `condDomiRuc`.
@@ -67,10 +68,10 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
   6. **`manual`:** always the last step.
 - **R-5.3 (M)** WHEN a portal shows an image captcha, THE SYSTEM SHALL first try local OCR (≤ 2 attempts). It SHALL then send the captcha image to the user and wait up to 5 min for a text reply.
 - **R-5.4 (S)** WHEN a portal shows reCAPTCHA/hCaptcha, THE SYSTEM SHALL skip to the next fetcher, unless a paid solver is enabled.
-- **R-5.5 (M)** IF every fetcher fails, THE SYSTEM SHALL set `MANUAL_REQUIRED`, tell the user which fetchers failed and why (one line each), and accept the files later (R-1.5).
+- **R-5.5 (M)** IF every fetcher fails, THE SYSTEM SHALL set `MANUAL_REQUIRED` and send BR-F07: which fetchers failed and why, one line each, using the BR-F catalog. It SHALL accept the files later (R-1.5).
 - **R-5.6 (M)** A fetched XML SHALL be checked to match the invoice: its RUC, serie, número and total equal the confirmed data.
 - **R-5.7 (S)** THE SYSTEM SHALL record per-portal success and failure stats, so you can see which registry entries are broken.
-- **R-5.8 (S)** Portal registry entries SHALL be editable without redeploying (a YAML file or a `/portal` command), keyed by issuer RUC, with an optional match by name.
+- **R-5.8 (M)** Portal registry entries SHALL live in `config/portals.yaml` in the repo, keyed by issuer RUC, with an optional match by name. Each entry has a `status ∈ {active, todo, broken}`, and only `active` entries are used. A merged change SHALL reach the VPS without a manual deploy (R-11.9).
 - **R-5.9 (C)** IF the flow allows it, THE SYSTEM MAY continue delivery without the PDF/XML, marking the row "documents pending", and attach them later when they arrive.
 
 ## R-6 · Flow A: Google Drive + Sheets
@@ -103,7 +104,7 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
 ## R-9 · Non-functional
 - **R-9.1 (M)** Memory: steady state ≤ 350 MB RSS, peak ≤ 800 MB on a 1 GB host, verified by a load test of 10 queued invoices.
 - **R-9.2 (M)** Latency: acknowledgement in < 5 s. Summary (QR path) in < 20 s, (OCR path) in < 60 s, on 1 vCPU.
-- **R-9.3 (M)** WhatsApp messages per invoice: ≤ 4 in the happy path, to stay within 1,000 free service messages per month.
+- **R-9.3 (M)** WhatsApp messages per invoice: ≤ 3 in the happy path (acknowledgement, summary, completion), thanks to auto-routing; ≤ 5 with a gap question. This keeps us inside the free service-message allowance.
 - **R-9.4 (M)** Durability: a restart in any state resumes or reports the job. There are no lost invoices.
 - **R-9.5 (M)** Observability: structured JSON logs, a `/health` endpoint, and per-job step timings. Secrets are never logged.
 - **R-9.6 (M)** Configuration: one YAML file plus `.env` for secrets. Changing flows, portals or templates needs a restart at most (hot reload: C).
@@ -120,4 +121,22 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
 | `/enviar` | Send the open batch now | M |
 | `/reprocesar <id>` | Re-run fetch and delivery | S |
 | `/cancelar <id>` | Cancel an invoice | S |
-| `/portal <ruc> <url>` | Register a portal URL for an issuer (generic adapter stub) | C |
+| `/portal <ruc> <url>` | Teach the portal link for an issuer. Same effect as answering the BR-F02 question | S |
+| `/gaps` | *(admin)* List open gaps with their issue and PR links | S |
+| `/gap ignorar <id>` | *(admin)* Stop alerting for one gap fingerprint | S |
+
+## R-11 · Business rules, gaps and alerts
+- **R-11.1 (M)** Every stop, warning or reroute SHALL reference a rule ID from `specs/06-business-rules.md`, and SHALL use that rule's message from the catalog. A test SHALL fail if any rule in the spec has no catalog entry, or the other way round.
+- **R-11.2 (M)** WHEN a rule marked as a gap fires, THE SYSTEM SHALL upsert a `gaps` row by fingerprint (count, last_seen, linked invoice IDs). Detecting a gap SHALL **never** block the fetcher chain.
+- **R-11.3 (M)** The chat layer SHALL tell the user, in plain words, what is missing and whether the bot will retry by itself (`{gap_line}`).
+- **R-11.4 (S)** WHEN `PORTAL_MISSING` fires for an issuer for the first time, THE SYSTEM SHALL ask the user for the portal link, once per issuer and not once per invoice (BR-F02). Answers SHALL be validated (only `https`, a public hostname, ≤ 300 characters, no credentials in the URL) before they are stored.
+- **R-11.5 (M)** WHEN a gap is new (or reopened), THE SYSTEM SHALL, through the outbox and with retries:
+  1. open a GitHub issue (labels `gap`, `gap:<kind>`) from a template, including only the data allowed by the privacy rule;
+  2. for `PORTAL_MISSING` and `PORTAL_BROKEN`, create branch `gap/<fingerprint-slug>`, commit the stub or status change to `config/portals.yaml` (an append or a single-line edit that keeps comments intact), and open a **draft PR** that says `Closes #<issue>`;
+  3. never push to the default branch.
+- **R-11.6 (M)** CI SHALL run `scripts/check_config.py` and **fail** while any `portals.yaml` entry is `todo` or `broken`, or while config fails validation. A gap PR is therefore red until someone completes it.
+- **R-11.7 (S)** A scheduled workflow (`gap-watch`, daily) SHALL fail while any `gap` issue has been open for more than `gap_sla_days` (default 3). This keeps the Actions status red and triggers GitHub's failure email.
+- **R-11.8 (M)** WHEN a gap is new, THE SYSTEM SHALL send **one** WhatsApp message to each `admins` number with the kind, the subject and the issue/PR links. Kinds marked "digest" go into a daily summary instead. Alerts for the same fingerprint SHALL be rate-limited to one per `realert_days` (default 7).
+- **R-11.9 (M)** WHEN the deployed config changes (a pull from the default branch, then a hot reload of `portals.yaml`, `parsing_rules.yaml` and routing), THE SYSTEM SHALL re-evaluate open gaps. For each gap that is now fixed, it SHALL re-enqueue the linked invoices (`MANUAL_REQUIRED`/`PENDING_AUTH` → `FETCHING_DOCS`/`DELIVERING`) and tell their senders.
+- **R-11.10 (M)** GitHub access SHALL use a credential scoped to **this repository only**, with Issues, Pull requests and Contents (write) permissions. The daily budget for GitHub writes is ≤ 20 operations. Failures to reach GitHub SHALL NOT affect invoice processing; they are retried from the outbox.
+- **R-11.11 (S)** IF GitHub is disabled or unreachable for more than 24 h, THE SYSTEM SHALL still alert the admin on WhatsApp, so the alert path never depends only on GitHub.

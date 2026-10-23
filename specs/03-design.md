@@ -11,6 +11,8 @@
    │ queue/           SQLite-backed job queue (lease + retry + backoff)                      │
    │ worker/          1 async worker loop; HEAVY semaphore = 1 (OCR / browser)               │
    │ pipeline/        state machine per invoice (see §4)                                     │
+   │   routing/       ordered rules → flow id (no menu unless unmatched, see §12)            │
+   │   rules/         business-rule catalog BR-* → state + es-PE message (spec 06)           │
    │   extract/       qr.py → ocr.py → parse.py → validate.py   (+ padron lookup)            │
    │   sunat/         validez API client (token cache)                                       │
    │   fetchers/      chain: qr_url → portal_registry → email_inbox → sunat_sol → paid → manual│
@@ -18,6 +20,7 @@
    │ flows/           declarative YAML: which fetchers, which sinks, batching, templates     │
    │ scheduler/       tiny cron (asyncio) for scheduled batches + housekeeping               │
    │ store/           SQLite (WAL): messages, invoices, jobs, batches, files, kv cache       │
+   │ gaps/            gap service → outbox → GitHub REST (issue + draft PR) + admin WhatsApp │
    └─────────────────────────────────────────────────────────────────────────────────────────┘
          ▲ on demand only: chromium-headless-shell (Playwright), tesseract (subprocess)
 ```
@@ -28,6 +31,8 @@
 - **State machine:** invoice lifecycle.
 - **Strategy:** email trigger modes.
 - **Registry:** portals and flows.
+- **Rules engine (ordered predicates, first match):** routing.
+- **Observer/outbox:** gap events fan out to GitHub and admin alerts without blocking the pipeline.
 - **Outbox:** outgoing WhatsApp messages are persisted, then sent, so they're retry-safe.
 
 ## 2. Tech stack (chosen for a 1 GB RAM host)
@@ -66,13 +71,17 @@ messages(id TEXT PK /*meta msg id*/, sender, kind, received_at, payload_json)   
 invoices(id INTEGER PK, sender, flow_id, state, natural_key TEXT UNIQUE NULL,
          ruc_emisor, tipo, serie, numero, fecha, moneda, base, igv, total,
          ruc_adq, razon_social, fields_json /*value+source+confidence*/,
-         sunat_status_json, batch_id NULL, error, created_at, updated_at)
+         sunat_status_json, batch_id NULL, rule_id NULL, error, created_at, updated_at)
 files(id PK, invoice_id, kind /*photo|pdf|xml|xlsx|captcha*/, local_path NULL,
       remote_ref NULL, sha256, size, created_at)
 jobs(id PK, invoice_id, step, run_after, attempts, lease_until, last_error)              -- queue
 batches(id PK, flow_id, state /*open|sending|sent*/, opened_at, sent_at, email_ref)
 fetch_attempts(id PK, invoice_id, fetcher, portal_key, ok, reason, ms, at)               -- R-5.7 stats
-outbox(id PK, to, payload_json, state, attempts, created_at)                              -- outbox pattern
+outbox(id PK, channel /*whatsapp|github*/, to, payload_json, state, attempts, created_at) -- outbox pattern
+gaps(fingerprint TEXT PK, kind, subject, state /*open|reported|fixed|closed|ignored*/,
+     hint_url NULL, count, first_seen, last_seen, last_alert_at, issue_url NULL, pr_url NULL)
+invoice_gaps(invoice_id, fingerprint, PRIMARY KEY(invoice_id, fingerprint)) WITHOUT ROWID
+taught_links(ruc_emisor INTEGER PK, url, sender, at) WITHOUT ROWID                       -- R-11.4
 kv(key PK, value, expires_at)                                                            -- token cache etc.
 padron(ruc INTEGER PK, razon_social, estado, condicion) WITHOUT ROWID
 ```
@@ -80,17 +89,20 @@ Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confi
 
 ## 4. Invoice state machine
 ```
-RECEIVED ─► EXTRACTING ─► CONFIRMING ──(user picks flow / edits)──► VALIDATING ─► FETCHING_DOCS
-                │              │  ▲ edit                                  │            │  ├─► WAITING_CAPTCHA ─┐
-                │              ▼  │                                       │ estadoCp≠1 │  ◄────────────────────┘
-                │         PENDING_USER (timeout)                          ▼            ▼
-                ▼                                                  CONFIRM_INVALID   DELIVERING ─► DONE
-           EXTRACT_FAILED → asks user for data / better photo                         │   (flow B on_command/scheduled:
-                                                                                      │    DONE = added to batch)
-                                         FETCHING_DOCS (all fetchers failed) ─► MANUAL_REQUIRED ─(user sends files)─► DELIVERING
-   any ─► CANCELLED (/cancelar) ;  transient error ─► retry w/ exp. backoff (max 5) ─► FAILED
+RECEIVED ─► EXTRACTING ─► ROUTING ──(rule matched & all fields ok, confirm_mode=auto)──► VALIDATING ─► FETCHING_DOCS
+                │            │                                                          │              │ ├─► WAITING_CAPTCHA ─┐
+                │            └─(BR-R03 unknown buyer / BR-R04 low confidence / review)──► CONFIRMING   │ ◄────────────────────┘
+                │                                                     │  ▲ edit   │ timeout          ▼
+                ▼                                                     └──┘        ▼             DELIVERING ─► DONE
+           EXTRACT_FAILED (BR-E01) → user sends data / better photo      PENDING_USER            │  ▲   (flow B batch modes:
+                                                                                                │  │    DONE = added to batch)
+   FETCHING_DOCS (all fetchers failed, BR-F07) ─► MANUAL_REQUIRED ─(user sends files | linked gap fixed)─► DELIVERING / FETCHING_DOCS
+   DELIVERING (token expired, BR-D01) ─► PENDING_AUTH ─(re-auth)─► DELIVERING
+   VALIDATING (estadoCp=2, BR-V02) ─► CONFIRM_INVALID ─(user: continue)─► FETCHING_DOCS
+   any ─► CANCELLED (/cancelar, BR-R05, BR-E05) ;  transient error ─► retry w/ exp. backoff (max 5) ─► FAILED
 ```
-Each transition is a single SQLite transaction (state update + next job insert + outbox message).
+- Each transition is a single SQLite transaction (state update + next job insert + outbox message), and it records the **rule ID** that caused it (`invoices.rule_id`). `/estado` can therefore always explain *why* an invoice is where it is.
+- With `confirm_mode: auto`, the "Editar" and "Cancelar" buttons from the summary are accepted in any state before `DELIVERING`. An edit re-enters `ROUTING`.
 
 ## 5. Extraction pipeline detail
 1. **Load:**
@@ -178,7 +190,7 @@ Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, 
 
 ## 9. Security
 - Webhook: HMAC SHA-256 check with the app secret. Verify-token handshake on GET.
-- Allowlist: `senders:` in config, mapped to a profile (default flow suggestions, permissions such as `can_send_batch`).
+- Allowlist: `senders:` in config, mapped to a profile (allowed flows, permissions such as `can_send_batch`, admin).
 - Secrets in `.env` (root-only permissions). Optional `sops` + `age` for encrypted-at-rest files in the repo. The token caches (`msal`, Google refresh token) live in `/data/secrets/` with mode 600.
 - SOL: secondary user with only the query options. Credentials are never sent to paid APIs unless that adapter is explicitly enabled.
 - The scraper honors per-domain rate limits (≥ 10 s between requests to the same portal), uses a realistic UA, and makes no parallel requests.
@@ -195,6 +207,9 @@ invoice-bot/
     store/{db,migrations,repo}.py
     queue/{jobs,worker,scheduler}.py
     pipeline/{states,machine,messages_es}.py
+    routing/router.py    # ordered rules → flow id
+    rules/catalog.py     # BR-* ids → (state, message key); parity test vs specs/06
+    gaps/{service,github,alerts,stubs}.py
     extract/{image,qr,ocr,parse,validate,padron,ubl}.py
     sunat/{validez,sol}.py
     fetchers/{base,qr_url,portal_registry,email_inbox,sunat_sol,paid_api,manual}.py
@@ -202,7 +217,9 @@ invoice-bot/
     sinks/{base,google_drive,google_sheets,onedrive,excel_template,mailer_gmail,mailer_graph,n8n_hook}.py
     auth/{google_oauth,msal_cache}.py
     browser/pool.py
-  scripts/{auth_google.py,auth_microsoft.py,import_padron.py,memprofile.py}
+  scripts/{auth_google.py,auth_microsoft.py,import_padron.py,memprofile.py,check_config.py}
+  .github/workflows/{ci.yml,gap-watch.yml}
+  .github/ISSUE_TEMPLATE/gap.md
   tests/{unit,integration,golden/{images,expected}}/
   deploy/{Dockerfile,docker-compose.yml,cloudflared.yml}
 ```
@@ -216,3 +233,54 @@ invoice-bot/
   - Fake channel for end-to-end conversation tests.
 - **Portal adapters:** a smoke test command `invoicebot portal-test <key> <sample-invoice>` that you run by hand, because live portals stay out of CI.
 - **Resource test:** `memprofile.py` (R-9.1) and a latency report (R-9.2).
+
+## 12. Routing (replaces the flow menu)
+```python
+@dataclass(frozen=True, slots=True)
+class Rule:            # compiled once at config load
+    id: str            # "BR-R01"
+    when: Mapping[str, frozenset[str]]   # field -> allowed values (sets → O(1) membership)
+    flow: str
+def route(inv, sender) -> RouteResult:   # first match wins; O(rules) ≈ O(1) for a handful of rules
+```
+- Rules come from the `routing:` section of the config. `{owner.ruc}` and `{work.ruc}` are resolved at load time.
+- Unmatched → `RouteResult(flow=None, rule="BR-R03", candidates=[...flows allowed for the sender's profile])`.
+- The low-confidence check (BR-R04) runs **after** the match, using `fields["num_doc_adq"].confidence`.
+- Adding a flow C (for example, a second company) means a new `flows:` entry plus one routing rule. The code stays the same.
+
+## 13. Gap service and GitHub alerts
+```
+pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.upsert()  (same DB tx as the transition)
+                                                           │ new or re-alert due?
+                                                           ▼
+                                   outbox rows: github.issue → github.branch+commit → github.draft_pr ; whatsapp.admin
+                                                           ▼ (worker, retries with backoff, daily budget ≤ 20 GitHub writes)
+                                            GitHub REST via the shared httpx client (no extra dependency)
+```
+- **Idempotency:**
+  - The fingerprint is the gaps PK.
+  - Before creating anything, the issue search uses the label `gap` plus a hidden marker `<!-- gap:fingerprint -->` in the body, so a lost DB row never duplicates an issue.
+  - The branch name is deterministic (`gap/portal-missing-20123456789`).
+- **Draft PR content (`PORTAL_MISSING`):** an appended YAML block, built from the taught URL, the printed URL or a placeholder.
+  ```yaml
+  - key: todo-20123456789          # TODO: rename
+    status: todo                    # check_config.py fails CI while this is "todo"
+    match: { ruc: ["20123456789"] }
+    name: "RESTAURANTE EJEMPLO S.A.C."
+    url: "https://example.com/consulta"   # taught via WhatsApp on 2026-10-23 (validated https)
+    adapter: generic_form
+    fields: {}                      # TODO: CSS selectors
+    seen: { invoices: 3, series: ["F001"] }
+  ```
+  The PR body includes a checklist: fill the selectors, run `invoicebot portal-test <key>`, set `status: active`.
+- **CI red:**
+  - `ci.yml` runs lint, typecheck, tests, the rules↔catalog parity test (R-11.1) and `check_config.py`, which validates all YAML with the same pydantic models as the app and fails on `todo`/`broken`.
+  - `gap-watch.yml` (cron, daily) uses the built-in `GITHUB_TOKEN` (read-only issues) and fails when a `gap` issue is older than `gap_sla_days`. GitHub emails the failure.
+- **Admin alert (WhatsApp):** `🧩 Falta configurar: {kind_desc} — {subject}. Issue: {issue_url} · PR: {pr_url}`. Sent once per fingerprint per `realert_days`; "digest" kinds are batched into one daily message. The message is a free-form service message when the admin has written to the bot within the last 24 h; otherwise it uses a pre-approved **utility template** `gap_alert` (one is needed, because business-initiated messages outside the 24 h window require templates).
+- **Deploy loop (how a merged fix reaches the VPS, R-11.9):**
+  1. A systemd timer on the VPS runs `git fetch && git merge --ff-only origin/main` every 10 min. It needs no inbound access and no deploy keys with write rights; a read-only deploy key is enough.
+  2. When `config/` changes, the app gets `SIGHUP` and hot-reloads its config.
+  3. When code changes, a container rebuild is needed.
+  4. After a reload, `GapService.reevaluate()` checks each open gap against the new registry, marks the fixed ones, and re-enqueues the linked invoices.
+- **Credential:** a fine-grained PAT (or a GitHub App, see Q13) limited to this repo, with Issues, Pull requests and Contents (write). It is stored in `.env` as `GITHUB_TOKEN`; its expiry date is stored too, for BR-D05.
+- **Budget:** the gap service holds no memory. It is one table plus outbox rows, and it sends ≤ 20 GitHub calls a day.

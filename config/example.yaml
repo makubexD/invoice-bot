@@ -34,12 +34,21 @@ extraction:
   review_threshold: 0.8
   max_invoice_age_days: 365
 
-# Rules to *suggest* a flow in the confirmation message (user always decides).
-flow_suggestion:
-  - when: { num_doc_adq: "{owner.ruc}" }
-    suggest: personal_google
-  - when: { num_doc_adq: "{work.ruc}" }
-    suggest: work_microsoft
+# Automatic routing (R-3.1). Ordered; the first match wins. No menu unless nothing matches (BR-R03).
+routing:
+  confirm_mode: auto            # auto: proceed when every field is ok | always: wait for a confirmation tap
+  rules:
+    - id: BR-R01
+      when: { num_doc_adq: ["{owner.ruc}"] }
+      flow: personal_google
+    - id: BR-R02
+      when: { num_doc_adq: ["{work.ruc}"] }
+      flow: work_microsoft
+    # Example for later: a second company, or route by issuer
+    # - id: BR-R10
+    #   when: { num_doc_adq: ["20ZZZZZZZZZ"] }
+    #   flow: second_company
+  unmatched: ask                # ask (BR-R03) | reject
 
 flows:
   personal_google:
@@ -118,6 +127,24 @@ retrieval:
     ask_user_timeout_s: 300
     paid_solver: { enabled: false, provider: 2captcha }   # TWOCAPTCHA_KEY
   paid_api: { enabled: false, provider: factiliza }
+
+gaps:                           # R-11 · capability gaps → GitHub + admin
+  github:
+    enabled: true
+    repo: "makubexD/invoice-bot"
+    labels: [gap]
+    daily_write_budget: 20
+    # GITHUB_TOKEN (fine-grained, this repo only) and GITHUB_TOKEN_EXPIRES (YYYY-MM-DD) in .env
+  admins: ["51999999999"]       # get the WhatsApp alerts
+  teach_via_chat: true          # BR-F02: ask the user for the portal link (once per issuer)
+  realert_days: 7
+  gap_sla_days: 3               # gap-watch workflow turns red after this
+  broken_after: 3               # consecutive technical failures → PORTAL_BROKEN
+  digest_kinds: [PARSER_MISS, UNROUTED_BUYER]
+  digest_cron: "0 8 * * *"
+
+deploy:
+  config_pull: { enabled: true, interval_min: 10, branch: main }   # R-11.9 pull + hot reload
 
 limits:
   max_queued_per_sender: 20

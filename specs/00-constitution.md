@@ -41,3 +41,12 @@ These principles govern every spec, design decision, and pull request. A change 
 ## P8 · Spec-first and test-first
 - Every requirement has an ID (`R-x.y`), and every task and test references one.
 - A golden dataset of real invoice photos with expected JSON is the acceptance test for extraction.
+
+## P9 · Fail loud, never silent
+- Every stop, warning or reroute has a **business rule ID** (`BR-*`) and a clear Spanish message telling the user what happened and what comes next (spec 06).
+- When the cause is a missing capability in the repo, the system raises a **gap**:
+  - a GitHub issue plus a draft PR;
+  - CI goes red until the gap is fixed;
+  - the admin gets a WhatsApp alert.
+- When the fix is deployed, the affected invoices resume automatically.
+- The UX stays smooth: no menus when the code can decide (the flow comes from the buyer RUC). Questions are asked only when data is missing or ambiguous.

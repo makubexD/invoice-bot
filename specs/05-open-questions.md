@@ -1,12 +1,12 @@
 # 05 · Open questions and decisions
 
-## Decided (from the Q&A on 2026-10-13)
+## Decided (Q&A on 2026-10-13 and 2026-10-23)
 | # | Decision |
 |---|---|
 | D1 | Country: **Peru (SUNAT)** |
 | D2 | Channel: **official WhatsApp Cloud API**, with Telegram as an optional fallback |
 | D3 | Users: several allowlisted people, **< 200 invoices per month** |
-| D4 | Flow selection: **ask in chat**. The bot suggests a default from the buyer RUC |
+| D4 | ~~Ask in chat~~ → **revised 2026-10-23:** the flow is picked **automatically from the buyer RUC** (owner → A, work → B). A menu appears only when nothing matches (BR-R03) |
 | D5 | Flow A: buyer is the owner's company RUC (20…); **SUNAT is the fallback** (owner has SOL) |
 | D6 | Flow B: buyer is the employer's RUC; **no SUNAT access** → portals, then email, then manual |
 | D7 | Hosting: **1 GB RAM VPS**, highly optimized (see constitution P2) |
@@ -14,6 +14,10 @@
 | D9 | Flow B email: **all three trigger modes** (per invoice, on command, scheduled), configurable and combinable |
 | D10 | Flow B Excel: **existing template, update specific cells** |
 | D11 | When every fallback fails → **MANUAL_REQUIRED** and the user is told what is missing |
+| D12 | Unknown, DNI or empty buyer → **ask then, and only then**, with buttons Mi empresa / Trabajo / Cancelar |
+| D13 | Missing capability → **GitHub issue + draft PR + red CI** (spec 06 §3) |
+| D14 | Unknown store portal → the bot **asks the user for the link** (once per issuer) and puts it into the draft PR |
+| D15 | Admin alerts also go to **WhatsApp** (in addition to GitHub's own notifications) |
 
 ## Open (needed before or during Phase 0)
 | # | Question | Why it matters | Default if unanswered |
@@ -29,3 +33,9 @@
 | Q9 | Any currency other than PEN (USD invoices)? | Parsing and Sheets formatting | PEN, USD read from XML when present |
 | Q10 | Comfortable creating a **secondary SOL user** with query-only permissions for the bot? | Security of the `sunat_sol` fetcher | Yes |
 | Q11 | Do you already have a VPS provider or a domain for Cloudflare Tunnel? | Deploy | Any 1 GB VPS, plus a free `trycloudflare` URL for dev |
+| Q12 | Is the GitHub repo **private** or **public**? | Private is recommended. The gap issues are already privacy-safe (spec 06), but the real `config.yaml` (your RUCs, phone numbers) must never be committed to a public repo | Private; the real config lives only on the VPS |
+| Q13 | GitHub credential for the bot: a **fine-grained PAT** (5 min to set up, expires after ≤ 1 year, and the bot warns 14 days before) or a **GitHub App** (no expiry, ~20 min to set up)? | Auth for R-11.5 | Fine-grained PAT |
+| Q14 | Who gets the admin WhatsApp alerts: only you, or more numbers? | `gaps.admins` | Only you |
+| Q15 | Who fixes a gap PR? Only you, or should we enable **Claude Code on GitHub** (mention `@claude` on the issue) to draft the portal selectors for you to review? | It turns a gap into "review and merge" | You; `@claude` is optional |
+| Q16 | OK for the VPS to **pull `main` every 10 min** and hot-reload the config (so a merged portal fix is live within ~10 min, with no manual deploy)? | R-11.9 auto-resume | Yes |
+| Q17 | `confirm_mode: auto` (no tap needed when everything reads fine; you can still tap Editar/Cancelar) vs `always` (tap to confirm every invoice)? | UX and message count | `auto` |
