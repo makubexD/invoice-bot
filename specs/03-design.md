@@ -282,5 +282,5 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
   2. When `config/` changes, the app gets `SIGHUP` and hot-reloads its config.
   3. When code changes, a container rebuild is needed.
   4. After a reload, `GapService.reevaluate()` checks each open gap against the new registry, marks the fixed ones, and re-enqueues the linked invoices.
-- **Credential:** a fine-grained PAT (or a GitHub App, see Q13) limited to this repo, with Issues, Pull requests and Contents (write). It is stored in `.env` as `GITHUB_TOKEN`; its expiry date is stored too, for BR-D05.
+- **Credential:** a fine-grained personal access token (D17) limited to this repo, with Issues, Pull requests and Contents (write). It is stored in `.env` as `GITHUB_TOKEN`; its expiry date is stored too, for BR-D05.
 - **Budget:** the gap service holds no memory. It is one table plus outbox rows, and it sends ≤ 20 GitHub calls a day.

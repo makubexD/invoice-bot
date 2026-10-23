@@ -18,8 +18,15 @@
 | D13 | Missing capability → **GitHub issue + draft PR + red CI** (spec 06 §3) |
 | D14 | Unknown store portal → the bot **asks the user for the link** (once per issuer) and puts it into the draft PR |
 | D15 | Admin alerts also go to **WhatsApp** (in addition to GitHub's own notifications) |
+| D16 | GitHub repo is **private**. The real config (RUCs, phone numbers) lives only on the VPS, never in git (Q12) |
+| D17 | Bot GitHub credential: **fine-grained personal access token**, this repo only (Issues, PRs, Contents); expiry warning 14 days before (Q13) |
+| D18 | Admin alerts go **only to the owner's number** (Q14) |
+| D19 | Gap PRs are completed by the **owner**; tagging `@claude` on the issue is optional help (Q15) |
+| D20 | The VPS **pulls `main` every 10 min** and hot-reloads the config, so merged fixes go live and stuck invoices resume automatically (Q16) |
+| D21 | `confirm_mode: auto`: no tap needed when everything reads cleanly; Editar/Cancelar stay available (Q17) |
 
 ## Open (needed before or during Phase 0)
+Until they are answered, work proceeds with the default in the last column. Q2–Q5 still need real input (accounts, recipients, template file, inbox) before E11 and S9.5.
 | # | Question | Why it matters | Default if unanswered |
 |---|---|---|---|
 | Q1 | OK with n8n as an *optional* add-on (off on the 1 GB host), with the core in Python? Or do you prefer a 2 GB host (~US$4–6/mo) so n8n runs alongside? | RAM budget | Core in Python, n8n off |
@@ -33,9 +40,3 @@
 | Q9 | Any currency other than PEN (USD invoices)? | Parsing and Sheets formatting | PEN, USD read from XML when present |
 | Q10 | Comfortable creating a **secondary SOL user** with query-only permissions for the bot? | Security of the `sunat_sol` fetcher | Yes |
 | Q11 | Do you already have a VPS provider or a domain for Cloudflare Tunnel? | Deploy | Any 1 GB VPS, plus a free `trycloudflare` URL for dev |
-| Q12 | Is the GitHub repo **private** or **public**? | Private is recommended. The gap issues are already privacy-safe (spec 06), but the real `config.yaml` (your RUCs, phone numbers) must never be committed to a public repo | Private; the real config lives only on the VPS |
-| Q13 | GitHub credential for the bot: a **fine-grained PAT** (5 min to set up, expires after ≤ 1 year, and the bot warns 14 days before) or a **GitHub App** (no expiry, ~20 min to set up)? | Auth for R-11.5 | Fine-grained PAT |
-| Q14 | Who gets the admin WhatsApp alerts: only you, or more numbers? | `gaps.admins` | Only you |
-| Q15 | Who fixes a gap PR? Only you, or should we enable **Claude Code on GitHub** (mention `@claude` on the issue) to draft the portal selectors for you to review? | It turns a gap into "review and merge" | You; `@claude` is optional |
-| Q16 | OK for the VPS to **pull `main` every 10 min** and hot-reload the config (so a merged portal fix is live within ~10 min, with no manual deploy)? | R-11.9 auto-resume | Yes |
-| Q17 | `confirm_mode: auto` (no tap needed when everything reads fine; you can still tap Editar/Cancelar) vs `always` (tap to confirm every invoice)? | UX and message count | `auto` |
